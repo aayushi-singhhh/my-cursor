@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "dev": "node --watch index.js"
   },
@@ -11,6 +12,7 @@
   "license": "ISC",
   "packageManager": "pnpm@10.15.0",
   "dependencies": {
+    "dotenv": "^17.2.1",
     "openai": "^5.15.0"
   }
 }

@@ -1,5 +1,7 @@
 import {OpenAI} from 'openai';
 import {exec} from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -28,12 +30,26 @@ function executeCommand(command){
 function createFile(params) {
     const { filename, content } = JSON.parse(params);
     return new Promise((resolve, reject) => {
-        exec(`echo '${content.replace(/'/g, "'\\''")}' > ${filename}`, function (error, stdout, stderr) {
-            if (error) {
-                return reject(error);
+        try {
+            // Create directory if it doesn't exist
+            const dir = path.dirname(filename);
+            if (dir !== '.' && dir !== '') {
+                exec(`mkdir -p "${dir}"`, (mkdirError) => {
+                    if (mkdirError) {
+                        console.log(`Warning: Could not create directory ${dir}`);
+                    }
+                    // Write file regardless of mkdir result
+                    fs.writeFileSync(filename, content, 'utf8');
+                    resolve(`File ${filename} created successfully with ${content.length} characters`);
+                });
+            } else {
+                // Write file directly if no directory needed
+                fs.writeFileSync(filename, content, 'utf8');
+                resolve(`File ${filename} created successfully with ${content.length} characters`);
             }
-            resolve(`File ${filename} created successfully`);
-        });
+        } catch (error) {
+            reject(error);
+        }
     });
 }
 
@@ -57,6 +73,51 @@ function listAvailableTools() {
     const tools = Object.keys(TOOLS_MAP);
     return `Available tools: ${tools.join(', ')}`;
 }
+
+function readFile(params) {
+    const { filename } = JSON.parse(params);
+    try {
+        const content = fs.readFileSync(filename, 'utf8');
+        return `File content of ${filename}:\n${content}`;
+    } catch (error) {
+        return `Error reading file ${filename}: ${error.message}`;
+    }
+}
+
+function listFiles(params) {
+    const { directory = '.' } = JSON.parse(params);
+    try {
+        const files = fs.readdirSync(directory);
+        return `Files in ${directory}: ${files.join(', ')}`;
+    } catch (error) {
+        return `Error listing files in ${directory}: ${error.message}`;
+    }
+}
+
+function deleteFile(params) {
+    const { filename } = JSON.parse(params);
+    try {
+        fs.unlinkSync(filename);
+        return `File ${filename} deleted successfully`;
+    } catch (error) {
+        return `Error deleting file ${filename}: ${error.message}`;
+    }
+}
+
+function updateFile(params) {
+    const { filename, content, mode = 'replace' } = JSON.parse(params);
+    try {
+        if (mode === 'append') {
+            fs.appendFileSync(filename, content, 'utf8');
+            return `Content appended to ${filename} successfully`;
+        } else {
+            fs.writeFileSync(filename, content, 'utf8');
+            return `File ${filename} updated successfully with ${content.length} characters`;
+        }
+    } catch (error) {
+        return `Error updating file ${filename}: ${error.message}`;
+    }
+}
  
 const TOOLS_MAP={
     "getWeatherInfo": getWeatherInfo,
@@ -64,6 +125,10 @@ const TOOLS_MAP={
     "createFile": createFile,
     "createTool": createTool,
     "listAvailableTools": listAvailableTools,
+    "readFile": readFile,
+    "listFiles": listFiles,
+    "deleteFile": deleteFile,
+    "updateFile": updateFile,
 };
 
 const SYSTEM_PROMPT=`
@@ -84,7 +149,7 @@ const SYSTEM_PROMPT=`
     -output must be strictly json
     -only call tool action from Available tools only.
     -strictly follow the output format in json.
-    -When creating apps or files, use HTML/CSS/JavaScript for web apps
+    -When creating apps or files, use HTML/CSS/JavaScript for web apps and include all these files in a folder.
     -Use simple file operations like 'touch', 'mkdir', 'echo' for creating files
     -If you need a tool that doesn't exist, create it using createTool
     -When creating tools, the code should be a function body that returns a value
@@ -93,9 +158,22 @@ const SYSTEM_PROMPT=`
     Available tools:
     -getWeatherInfo(city:string):string
     -executeCommand(command:string):string Executes a given Linux/macOS command on user's device and returns the stdout and stderr.
-    -createFile(params:string):string Creates a new file. Params should be JSON: {"filename":"name.ext","content":"file content"}
+    -createFile(params:string):string Creates a new file with proper content handling. Params should be JSON: {"filename":"path/name.ext","content":"complete file content with proper formatting"}
     -createTool(params:string):string Creates a new custom tool. Params should be JSON: {"toolName":"name","description":"what it does","code":"function body that returns a value"}
     -listAvailableTools():string Lists all currently available tools
+    -readFile(params:string):string Reads content from a file. Params: {"filename":"path/to/file"}
+    -listFiles(params:string):string Lists files in a directory. Params: {"directory":"path/to/dir"} (optional, defaults to current directory)
+    -deleteFile(params:string):string Deletes a file. Params: {"filename":"path/to/file"}
+    -updateFile(params:string):string Updates or appends to a file. Params: {"filename":"path","content":"new content","mode":"replace|append"}
+
+    IMPORTANT for createFile:
+    - Include complete, functional code in the content
+    - Use proper indentation and formatting
+    - Include all necessary HTML structure, CSS styles, and JavaScript functionality
+    - For HTML files: include <!DOCTYPE html>, <html>, <head>, <body> tags
+    - For CSS files: include all necessary styles with proper selectors
+    - For JS files: include complete, working JavaScript code
+    - Create files in organized folder structure (e.g., app_name/index.html, app_name/styles.css, app_name/script.js)
 
     Example of creating a tool:
     ACTION: Call Tool createTool with input {"toolName":"generateHTML","description":"Generates HTML template","code":"const {title, content} = JSON.parse(params); return \`<!DOCTYPE html><html><head><title>\${title}</title></head><body>\${content}</body></html>\`;"}
@@ -130,51 +208,131 @@ const messages=[
 ];
 
 async function init() {
-    // Clear messages and start fresh
-    messages.length = 1; // Keep only the system prompt
+    messages.length = 1; 
 
-    const user_query="Create a complete todo list app with blue and grey aesthetics and lots of emojis. First create any tools you need, then use them to generate the app files. make the app in a folder named to do list and put all the code in it. fully functional";
-    messages.push({ role: 'user', content: user_query });
+    // Interactive mode - get user input from command line
+    const readline = await import('readline');
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
 
-    while (true){
-        const response= await client.chat.completions.create({ 
-            model: "openai/gpt-3.5-turbo", // Cheaper model to save credits
+    console.log('\n🤖 AI Agent with Dynamic Tool Creation');
+    console.log('=====================================');
+    console.log('Available commands:');
+    console.log('- Type your request and press Enter');
+    console.log('- Type "exit" to quit');
+    console.log('- Type "tools" to list available tools');
+    console.log('- Type "help" for examples\n');
+
+    const askQuestion = () => {
+        rl.question('💬 You: ', async (user_query) => {
+            if (user_query.toLowerCase() === 'exit') {
+                console.log('👋 Goodbye!');
+                rl.close();
+                return;
+            }
+
+            if (user_query.toLowerCase() === 'tools') {
+                console.log('🛠️  Available tools:', Object.keys(TOOLS_MAP).join(', '));
+                askQuestion();
+                return;
+            }
+
+            if (user_query.toLowerCase() === 'help') {
+                console.log('📚 Example queries:');
+                console.log('- "Create a todo app with modern design"');
+                console.log('- "Build a calculator web app"');
+                console.log('- "What\'s the weather in Paris?"');
+                console.log('- "Create a file organizer script"');
+                console.log('- "List files in current directory"');
+                askQuestion();
+                return;
+            }
+
+            if (!user_query.trim()) {
+                askQuestion();
+                return;
+            }
+
+            console.log('\n🤔 Agent is thinking...\n');
+            
+            // Clear previous conversation and start fresh
+            messages.length = 1;
+            messages.push({ role: 'user', content: user_query });
+
+            try {
+                await processAgentLoop();
+            } catch (error) {
+                console.log('❌ Error:', error.message);
+            }
+
+            console.log('\n' + '='.repeat(50) + '\n');
+            askQuestion();
+        });
+    };
+
+    askQuestion();
+}
+
+async function processAgentLoop() {
+    let stepCount = 0;
+    const maxSteps = 50; // Prevent infinite loops
+
+    while (stepCount < maxSteps) {
+        stepCount++;
+        
+        const response = await client.chat.completions.create({ 
+            model: "openai/gpt-3.5-turbo",
             response_format: { type: 'json_object' },
-            max_tokens: 2000, // Reduced from default 16384 to stay within credit limits
+            max_tokens: 2000,
             messages: messages,
         });
 
         messages.push({'role':'assistant', content: JSON.stringify(response.choices[0].message.content) });
         const parsed_response = JSON.parse(response.choices[0].message.content);
 
-        if (parsed_response.step&& parsed_response.step==="THINK"){
-            console.log(`THINK: ${parsed_response.content}`);
+        if (parsed_response.step && parsed_response.step === "THINK") {
+            console.log(`🧠 THINK: ${parsed_response.content}`);
             continue;
         }
-        if (parsed_response.step&& parsed_response.step==="OUTPUT"){
-            console.log(`OUTPUT: ${parsed_response.content}`);
+
+        if (parsed_response.step && parsed_response.step === "OUTPUT") {
+            console.log(`✅ OUTPUT: ${parsed_response.content}`);
             break;
         }
-        if (parsed_response.step&& parsed_response.step==="ACTION"){
-            const tool=parsed_response.tool;
-            const input=parsed_response.input;
 
-            console.log(`DEBUG: Trying to call tool "${tool}" with input "${input}"`);
-            console.log(`DEBUG: Available tools:`, Object.keys(TOOLS_MAP));
+        if (parsed_response.step && parsed_response.step === "ACTION") {
+            const tool = parsed_response.tool;
+            const input = parsed_response.input;
+
+            console.log(`⚡ ACTION: Using tool "${tool}"`);
             
             if (!TOOLS_MAP[tool]) {
-                console.log(`ERROR: Tool "${tool}" not found in TOOLS_MAP`);
+                console.log(`❌ ERROR: Tool "${tool}" not found`);
                 break;
             }
 
-            const value = await TOOLS_MAP[tool](input);
-            console.log(`ACTION: Tool Call ${tool}: (${input}):${value})`);
+            try {
+                const value = await TOOLS_MAP[tool](input);
+                console.log(`📊 RESULT: ${value}`);
 
-            messages.push({'role':'assistant', 
-                content: JSON.stringify({"step":"OBSERVE","content":value}) });
-            continue;
+                messages.push({'role':'assistant', 
+                    content: JSON.stringify({"step":"OBSERVE","content":value}) });
+                continue;
+            } catch (error) {
+                const errorMsg = `Error executing tool ${tool}: ${error.message}`;
+                console.log(`❌ ${errorMsg}`);
+                messages.push({'role':'assistant', 
+                    content: JSON.stringify({"step":"OBSERVE","content":errorMsg}) });
+                continue;
             }
         }
+    }
+
+    if (stepCount >= maxSteps) {
+        console.log('⚠️  Maximum steps reached. Agent may be in a loop.');
+    }
 }
 
 

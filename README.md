@@ -287,4 +287,4 @@ MIT License - Feel free to use and modify!
 
 **Happy coding with your AI agent! 🚀✨**
 
-Made with ❤️ by AI Agent Technology
+Made with ❤️ using OpenAI SDK
